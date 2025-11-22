@@ -66,7 +66,7 @@ class Diffusion:
         denoises using like algebra lol
         also taken from song paper. idt this is good enough, but will serve as a basis for what I'll do later.
         eps = (x_t - alpha * x_0) / sigma_t
-        x_0_hat = (x_t - sigma_t * eps) / alpha_t
+        x_0 = (x_t - sigma_t * eps) / alpha_t
 
         @param x_t: torch.Tensor of shape [B x S x E] which are the noised text embeddings
         @param eps: torch.tensor of shape [B x S x E], which is the predicted noise from prior step
