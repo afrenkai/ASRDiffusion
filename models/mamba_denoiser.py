@@ -50,7 +50,7 @@ class MambaDenoiser(nn.Module):
         self.n_layers = n_layers
         self.predict_scores = predict_scores
         self.mask_token_id = mask_token_id
-        self.mask_token = nn.Parameter(torch.randn(1, 1, text_dim))
+        self.mask_token = nn.Parameter(torch.randn(1, 1, text_dim, **factory_kwargs))
         self.time_embed = nn.Sequential(
             nn.Linear(d_model, d_model),
             nn.SiLU(),
@@ -160,6 +160,8 @@ class MambaDenoiser(nn.Module):
 
     def compute_score_loss(self, score_pred, x_t, x_0, sigma_t, mask=None):
         sigma_t = sigma_t.view(-1, 1, 1)
+        # kind of a moot point to clamp, might miss something 
+        sigma_t = torch.clamp(sigma_t, min=1e-5)
         true_score = -(x_t - x_0) / (sigma_t**2)
         # from song 2019
         # x = x_0 + sigma eps, eps ~ N(0, I)
@@ -169,9 +171,11 @@ class MambaDenoiser(nn.Module):
 
         if mask is not None:
             loss = loss * mask.unsqueeze(-1)
-            loss = loss.sum() / (mask.sum() * self.text_dim)
+            loss = loss.sum() / (mask.sum() * self.text_dim + 1e-8)
         else:
             loss = loss.mean()
+        #not sure if clamping would even work tbh
+        loss = torch.clamp(loss, max=1e6)
 
         return loss
 
@@ -186,10 +190,26 @@ if __name__ == "__main__":
     t = torch.randn(size=(num_samples,))
     print(t.size())
     tokenizer = AutoTokenizer.from_pretrained("google/gemma-2-2b-it")
+    model = MambaDenoiser(device=device)
+    model = model.to(device)
     encoded_audio, text_embeddings, diffusion_feats = pipeline(
-        samples, texts, t, tokenizer, use_char_level=False
+        samples, texts, t, tokenizer, use_char_level=False, device=device
     )
     x_t, eps_true, alpha_t, sigma_t = diffusion_feats
     x_t = x_t.to(device)
     encoded_audio = encoded_audio.to(device)
     text_embeddings = text_embeddings.to(device)
+    t = t.to(device)
+
+    mask = torch.ones(num_samples, x_t.size(1), device=device)
+
+    score_pred = model(
+        x_t=x_t, t=t, audio_features=encoded_audio, mask=mask, corrupt_mask=None
+    )
+
+    loss = model.compute_score_loss(
+        score_pred=score_pred, x_t=x_t, x_0=text_embeddings, sigma_t=sigma_t, mask=mask
+    )
+
+    print(f"Score prediction shape: {score_pred.shape}")
+    print(f"Loss: {loss.item():.4f}")

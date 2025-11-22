@@ -58,7 +58,9 @@ def create_mels_batches(samples):
     return mel_batch
 
 
-def encode(encoder: AudioEncoder, mel_batch: torch.Tensor) -> torch.Tensor:
+def encode(encoder: AudioEncoder, mel_batch: torch.Tensor, device: str = "cpu") -> torch.Tensor:
+    encoder = encoder.to(device)
+    mel_batch = mel_batch.to(device)
     encoder.eval()
     with torch.no_grad():
         encoded_audio = encoder(mel_batch)
@@ -76,7 +78,7 @@ def hf_tokenize(text, tokenizer, max_seq_len=512):
     return encoded["input_ids"].squeeze(0).tolist()
 
 
-def tokenize_and_embed(use_char_level: bool, texts, tokenizer) -> torch.Tensor:
+def tokenize_and_embed(use_char_level: bool, texts, tokenizer, device: str = "cpu") -> torch.Tensor:
     if use_char_level:
         token_seqs = [char_level_tokenize(text, tokenizer) for text in texts]
     else:
@@ -90,6 +92,8 @@ def tokenize_and_embed(use_char_level: bool, texts, tokenizer) -> torch.Tensor:
         seq_tensor = torch.clamp(seq_tensor, max=num_emb - 1)
         padded_tokens[i, : len(seq_tensor)] = seq_tensor
 
+    text_embedding.to(device)
+    padded_tokens = padded_tokens.to(device)
     text_embedding.eval()
     with torch.no_grad():
 
@@ -104,14 +108,15 @@ def forward_diffusion(
     min_sigma: float = 0.01,
     max_sigma=50.0,
 ):
+    timesteps = timesteps.to(text_embeddings.device)
     diffusion = Diffusion(min_sigma, max_sigma)
     return diffusion.add_noise(text_embeddings, timesteps, mask=mask)
 
 
-def pipeline(samples, texts, timesteps: torch.Tensor, tokenizer, use_char_level):
+def pipeline(samples, texts, timesteps: torch.Tensor, tokenizer, use_char_level, device: str = "cpu"):
     set_seed()
     mel_batches = create_mels_batches(samples)
-    encoded_audio = encode(audio_encoder, mel_batches)
-    text_embeddings = tokenize_and_embed(use_char_level, texts, tokenizer)
+    encoded_audio = encode(audio_encoder, mel_batches, device=device)
+    text_embeddings = tokenize_and_embed(use_char_level, texts, tokenizer, device=device)
     diffusion_feats = forward_diffusion(timesteps, text_embeddings)
     return encoded_audio, text_embeddings, diffusion_feats
