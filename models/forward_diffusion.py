@@ -1,6 +1,4 @@
 import torch
-import torch.nn as nn
-import torch.geometric as G
 from utils.consts import EPS
 import math
 
@@ -29,7 +27,7 @@ class Diffusion:
             # https://arxiv.org/abs/1907.05600
             sigma_t = self.sigma_min * (
                 (self.sigma_max / self.sigma_min) ** t
-            )  # need a source for this
+            )  
             alpha_t = torch.ones_like(t)
         elif self.sde_type == "VP":
             # https://arxiv.org/pdf/2102.09672
@@ -69,7 +67,7 @@ class Diffusion:
         alpha_t = alpha_t.view(bs, 1, 1)
         sigma_t = sigma_t.view(bs, 1, 1)
 
-        eps = torch.randn.like(x_0)
+        eps = torch.randn_like(x_0)
 
         if mask is not None:
             eps = eps * mask.unsqueeze(-1)
