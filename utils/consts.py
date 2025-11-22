@@ -10,7 +10,7 @@ DATASET_SPLITS = [
     "validation.other",
 ]
 DATASET_TEXT_COL = "text"
-
+DATADIR = "Data/"
 # character level tokenization stuff, will replace with BPE or something (or deprecate entirely)
 EOS = "EOS"
 PAD = "PAD"
