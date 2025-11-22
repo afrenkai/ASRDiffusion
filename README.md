@@ -16,3 +16,7 @@ requirements:
 - `uvx --from huggingface_hub hf auth login` if using UV for the CLI
 - ```from huggingface_hub import login \n login()``` for the programatic solution
 
+
+## Running Tests
+
+`uv run pytest` :)
