@@ -5,9 +5,8 @@ import math
 
 class Diffusion:
     def __init__(
-        self, sde_type: str = "VE", min_sigma: float = 0.1, max_sigma: float = 50.0
+        self, min_sigma: float = 0.1, max_sigma: float = 50.0
     ):
-        self.sde_type = sde_type
         self.sigma_min = min_sigma
         self.sigma_max = max_sigma
 
@@ -18,30 +17,16 @@ class Diffusion:
         Returns:
         alpha_t of shape [B] which is a signa coeff
         and sigma_t also of shape [B] which is a noise coeff
-
-        if using VE, which is the default, the noise grows ~Geom, while if type is VP then the noise grows with cos schedule
-
         """
 
-        if self.sde_type == "VE":
-            # https://arxiv.org/abs/1907.05600
-            sigma_t = self.sigma_min * (
-                (self.sigma_max / self.sigma_min) ** t
-            )  
-            alpha_t = torch.ones_like(t)
-        elif self.sde_type == "VP":
-            # https://arxiv.org/pdf/2102.09672
-            s = EPS
-            f_t = torch.cos(((t + s) / (1 + s)) * (math.pi / 2)) ** 2
-            f_0 = math.cos(s / (1 + s) * (math.pi / 2)) ** 2
+            # https://arxiv.org/pdf/2102.09672, eqn 17
+        s = EPS
+        f_t = torch.cos(((t + s) / (1 + s)) * (math.pi / 2)) ** 2
+        f_0 = math.cos(s / (1 + s) * (math.pi / 2)) ** 2
 
-            alpha_t_squared = f_t / f_0
-            alpha_t = torch.sqrt(alpha_t_squared)
-            sigma_t = torch.sqrt(1 - alpha_t_squared)
-        else:
-            raise ValueError(
-                f"we don't have that kind of SDE implemented yet... wait on {self.sde_type}"
-            )
+        alpha_t_squared = f_t / f_0
+        alpha_t = torch.sqrt(alpha_t_squared)
+        sigma_t = torch.sqrt(1 - alpha_t_squared)
         return alpha_t, sigma_t
 
     def add_noise(self, x_0, t, mask=None):
