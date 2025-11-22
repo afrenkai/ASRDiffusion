@@ -48,6 +48,7 @@ class Diffusion:
             bs = x_0.shape
         else:
             bs, seq_len, emb_dim = x_0.shape
+        print(bs)
         alpha_t, sigma_t = self.noise_schedule(t)
         print(alpha_t.shape)
         print(sigma_t.shape)
