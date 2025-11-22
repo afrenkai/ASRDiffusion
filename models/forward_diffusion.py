@@ -4,22 +4,20 @@ import math
 
 
 class Diffusion:
-    def __init__(
-        self, min_sigma: float = 0.1, max_sigma: float = 50.0
-    ):
+    def __init__(self, min_sigma: float = 0.1, max_sigma: float = 50.0):
         self.sigma_min = min_sigma
         self.sigma_max = max_sigma
 
     def noise_schedule(self, t: torch.Tensor):
         """
-        t should be of shape [B] and should be \in [0,1].
+        t should be of shape [B] and should be in [0,1].
 
         Returns:
         alpha_t of shape [B] which is a signa coeff
         and sigma_t also of shape [B] which is a noise coeff
         """
 
-            # https://arxiv.org/pdf/2102.09672, eqn 17
+        # https://arxiv.org/pdf/2102.09672, eqn 17
         s = EPS
         f_t = torch.cos(((t + s) / (1 + s)) * (math.pi / 2)) ** 2
         f_0 = math.cos(s / (1 + s) * (math.pi / 2)) ** 2
@@ -35,7 +33,7 @@ class Diffusion:
         similar to song, et. al this implements x_t = alpha * x_0 + sigma_t * epsilon
 
         @param x_0: torch.Tensor of shape [B x S x E], which is the result of us passing it through an embedding.
-        @param t: torch.Tensor of shape [B], which is the diffusion time \in [0,1]
+        @param t: torch.Tensor of shape [B], which is the diffusion time in [0,1]
         @param mask: optional torch.Tensor (1 = valid, 0 = pad, presumably since I haven't actually written it yet)
 
         Returns:
@@ -46,9 +44,13 @@ class Diffusion:
             sigma_t: torch.Tensor of shape [B] which has all of the noise coeffs, same as in DDPM
 
         """
-
-        bs, seq_len, emb_dim = x_0.shape
+        if x_0.ndim == 1:
+            bs = x_0.shape
+        else:
+            bs, seq_len, emb_dim = x_0.shape
         alpha_t, sigma_t = self.noise_schedule(t)
+        print(alpha_t.shape)
+        print(sigma_t.shape)
         alpha_t = alpha_t.view(bs, 1, 1)
         sigma_t = sigma_t.view(bs, 1, 1)
 

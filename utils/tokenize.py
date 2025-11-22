@@ -36,10 +36,8 @@ def build_tokenizer_vocab(
 
     tokenizer = Tokenizer.from_file("<PATH TO JSON>")
     from there, can be accessed aud used to encode and decode content, i.e.
-
     output = tokenizer.encode("Hello, y'all! How are you 😁 ?")
     """
-
     tok = Tokenizer(type(unk_token=unk_tok))
     trainer = BpeTrainer(
         special_tokens=special_toks, vocab_size=vocab_size, min_frequency=min_freq
