@@ -9,6 +9,17 @@ from models.mamba_block import MambaBlock
 from utils.consts import EPS
 
 
+class FiLMLayer(nn.Module):
+    def __init__(self, cond_dim, d_model):
+        super().__init__()
+        self.scale_shift = nn.Linear(cond_dim, 2 * d_model)
+        
+    def forward(self, x, cond):
+        scale_shift = self.scale_shift(cond)
+        scale, shift = scale_shift.chunk(2, dim=-1)
+        return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+
+
 class MambaDenoiser(nn.Module):
     """
     @param x_t: torch.Tensor representing the result of
@@ -39,6 +50,8 @@ class MambaDenoiser(nn.Module):
         dropout: float = 0.1,
         mask_token_id: int = -1,
         predict_scores: bool = True,
+        prediction_type: str = "score",
+        use_self_cond: bool = False,
         device=None,
         dtype=None,
     ):
@@ -49,8 +62,14 @@ class MambaDenoiser(nn.Module):
         self.d_model = d_model
         self.n_layers = n_layers
         self.predict_scores = predict_scores
+        self.prediction_type = prediction_type
+        self.use_self_cond = use_self_cond
         self.mask_token_id = mask_token_id
         self.mask_token = nn.Parameter(torch.randn(1, 1, text_dim, **factory_kwargs))
+        
+        if use_self_cond:
+            self.self_cond_proj = nn.Linear(text_dim, d_model)
+        
         self.time_embed = nn.Sequential(
             nn.Linear(d_model, d_model),
             nn.SiLU(),
@@ -86,6 +105,10 @@ class MambaDenoiser(nn.Module):
         self.layer_norms = nn.ModuleList(
             [nn.LayerNorm(d_model) for l in range(n_layers)]
         )
+        
+        self.film_layers = nn.ModuleList(
+            [FiLMLayer(d_model * 2, d_model) for _ in range(n_layers)]
+        )
 
         self.output_proj = nn.Linear(d_model, text_dim)
 
@@ -114,6 +137,7 @@ class MambaDenoiser(nn.Module):
         audio_features: torch.Tensor,
         mask: torch.Tensor | None = None,
         corrupt_mask: torch.Tensor | None = None,
+        self_cond: torch.Tensor | None = None,
     ):
 
         batch_size, seq_len, _ = x_t.shape
@@ -128,6 +152,9 @@ class MambaDenoiser(nn.Module):
         t_emb = self.time_embed(t_emb).unsqueeze(1)
 
         x = self.text_proj(x_input)
+        
+        if self.use_self_cond and self_cond is not None:
+            x = x + self.self_cond_proj(self_cond)
 
         audio = self.audio_pool(audio_features).squeeze(2)
         audio = audio.transpose(1, 2)
@@ -140,11 +167,16 @@ class MambaDenoiser(nn.Module):
             key_padding_mask=None,
         )
         x = self.ln_cross(x + attn_out)
+        
+        audio_pooled = audio.mean(dim=1)
+        time_cond = t_emb.squeeze(1)
+        cond = torch.cat([audio_pooled, time_cond], dim=-1)
 
-        for mamba_block, ln in zip(self.mamba_blocks, self.layer_norms):
+        for mamba_block, ln, film in zip(self.mamba_blocks, self.layer_norms, self.film_layers):
             residual = x
             x = ln(x)
             x = mamba_block(x)
+            x = film(x, cond)
             x = x + residual
 
         output = self.output_proj(x)
@@ -177,6 +209,32 @@ class MambaDenoiser(nn.Module):
         #not sure if clamping would even work tbh
         loss = torch.clamp(loss, max=1e6)
 
+        return loss
+    
+    def compute_v_loss(self, v_pred, x_t, x_0, eps, alpha_t, sigma_t, mask=None):
+        alpha_t = alpha_t.view(-1, 1, 1)
+        sigma_t = sigma_t.view(-1, 1, 1)
+        v_target = alpha_t * eps - sigma_t * x_0
+        
+        loss = F.mse_loss(v_pred, v_target, reduction="none")
+        
+        if mask is not None:
+            loss = loss * mask.unsqueeze(-1)
+            loss = loss.sum() / (mask.sum() * self.text_dim + 1e-8)
+        else:
+            loss = loss.mean()
+        
+        return loss
+    
+    def compute_eps_loss(self, eps_pred, eps_true, mask=None):
+        loss = F.mse_loss(eps_pred, eps_true, reduction="none")
+        
+        if mask is not None:
+            loss = loss * mask.unsqueeze(-1)
+            loss = loss.sum() / (mask.sum() * self.text_dim + 1e-8)
+        else:
+            loss = loss.mean()
+        
         return loss
 
 

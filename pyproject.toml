@@ -14,6 +14,7 @@ dependencies = [
     "scikit-learn>=1.7.2",
     "tokenizers>=0.22.1",
     "torch>=2.9.1",
+    "torchao>=0.14.1",
     "torchaudio>=2.9.1",
     "torchcodec>=0.8.1",
     "transformers>=4.57.1",

@@ -11,57 +11,9 @@ DATASET_SPLITS = [
 ]
 DATASET_TEXT_COL = "text"
 DATADIR = "Data/"
-# character level tokenization stuff, will replace with BPE or something (or deprecate entirely)
-EOS = "EOS"
-PAD = "PAD"
 
-SYMBOLS = [
-    PAD,
-    EOS,
-    " ",
-    "!",
-    ",",
-    "-",
-    ".",
-    ";",
-    "?",
-    "a",
-    "b",
-    "c",
-    "d",
-    "e",
-    "f",
-    "g",
-    "h",
-    "i",
-    "j",
-    "k",
-    "l",
-    "m",
-    "n",
-    "o",
-    "p",
-    "q",
-    "r",
-    "s",
-    "t",
-    "u",
-    "v",
-    "w",
-    "x",
-    "y",
-    "z",
-    "à",
-    "â",
-    "è",
-    "é",
-    "ê",
-    "ü",
-    "’",
-    "“",
-    "”",
-]
-
+PAD = "[PAD]"
+EOS = "[EOS]"
 
 NUM_MELS = 128
 # From NVIDIA TacoTron2 params
