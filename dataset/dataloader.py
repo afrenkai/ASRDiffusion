@@ -26,11 +26,11 @@ class LibriSpeechDataset(Dataset):
         return len(self.hf_dataset)
 
     def __getitem__(self, idx) -> tuple[torch.IntTensor, torch.Tensor]:
+        #Get the raw text transcription
         text = self.hf_dataset[idx][self.text_col]
-        #TODO: rewrite this entire method to use librispeech instead of ljspeech
+        
+        #Get the raw audio waveform
         audio_waveform = self.hf_dataset[idx]['audio']['array']
-        # sr is constant for the dataset, use speech_utils.sr
-        # sampling_rate = self.hf_dataset[idx]['audio']['sampling_rate']
         
         # Apply text_to_seq_fn to the text
         text_seq = self.text_to_seq_fn(text)
@@ -40,6 +40,8 @@ class LibriSpeechDataset(Dataset):
         #     warnings.filterwarnings("ignore", category=UserWarning)
         #     mel_transform = MelSpectrogram(sampling_rate, n_mels=self.num_mels)
         # mel_spec = mel_transform(audio_waveform)
+
+        #convert raw waveform --> log-mel
         mel_spec = self.speech_converter.convert_to_mel_spec(audio_waveform)
         
         return text_seq, mel_spec
@@ -49,17 +51,23 @@ def speech_collate_fn(batch):
     batch.sort(key=lambda x: len(x[0]), reverse=True)
     text_seqs, mel_specs = zip(*batch)
     text_seq_lens = [text_seq.shape[-1] for text_seq in text_seqs] # batch first
-   
+    
+    #prepare spectrograms for padding
     mel_specs_t = []
     mel_spec_lens = []
     max_mel_seq = -1
+
     for mel_spec in mel_specs:
+        #shape becomes (time, mel_bins)
         mel_specs_t.append(mel_spec.T)
+
+        #number of frames
         true_mel_size = mel_spec.shape[-1]
         mel_spec_lens.append(true_mel_size)
         if true_mel_size > max_mel_seq:
             max_mel_seq = true_mel_size
-    # need to know max size to pad to/ generate stop token input
+
+    #Build stop-token targets
     stop_token_targets = []
     for i in range(len(mel_specs)):
         stop_token_target = torch.zeros(max_mel_seq)
@@ -73,10 +81,12 @@ def speech_collate_fn(batch):
     tok = CharacterTokenization()
     padded_text_seqs = pad_sequence(text_seqs, batch_first=True, padding_value=tok.symbol_to_idx.get(PAD))
     padded_mel_specs = pad_sequence(mel_specs_t, batch_first=True, padding_value=0)
+
+    #convert lengths to tensors
     text_seq_lens = torch.IntTensor(text_seq_lens)
     mel_spec_lens = torch.IntTensor(mel_spec_lens)
     stop_token_targets = torch.stack(stop_token_targets)
-    # print("In collate", padded_mel_specs.shape, stop_token_targets.shape)
+
     return padded_text_seqs, text_seq_lens, padded_mel_specs, mel_spec_lens, stop_token_targets
 
 def get_data_loader(dataset: HFDataset, batch_size, shuffle=True, num_workers=0) -> DataLoader:
