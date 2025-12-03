@@ -1,5 +1,6 @@
 import torch
 from torch.utils.data import Dataset, DataLoader
+from torchaudio import load
 from torchaudio.transforms import MelSpectrogram
 from torch.nn.utils.rnn import pad_sequence
 from datasets import Dataset as HFDataset, load_dataset
@@ -12,7 +13,6 @@ from typing import Callable
 
 def BPE():
     pass
-
 
 class LibriSpeechDataset(Dataset):
     def __init__(self, hf_ds: HFDataset, text_col: str=DATASET_TEXT_COL, mels: int = NUM_MELS, tokenization_method: Callable = CharacterTokenization().text_to_seq_char_level):
@@ -30,10 +30,11 @@ class LibriSpeechDataset(Dataset):
         text = self.hf_dataset[idx][self.text_col]
         
         #Get the raw audio waveform
-        audio_waveform = self.hf_dataset[idx]['audio']['array']
+        audio_np = self.hf_dataset[idx]['audio']['array']
+        audio_waveform = torch.tensor(audio_np, dtype=torch.float32)
         
         # Apply text_to_seq_fn to the text
-        text_seq = self.text_to_seq_fn(text)
+        text_seq = self.tok_fn(text)
 
         # Processing the wave-form
         # with warnings.catch_warnings():
