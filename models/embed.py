@@ -15,6 +15,7 @@ class TextEmbedding(nn.Module):
             "pos_enc", self._create_positional_encoding(max_seq_len, embed_dim)
         )
 
+    # TODO: RoPE?
     def _create_positional_encoding(self, max_len, d_model):
         # sinusoidal pe from vaswani et al
         pe = torch.zeros(max_len, d_model)

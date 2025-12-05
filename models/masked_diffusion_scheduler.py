@@ -3,16 +3,6 @@ import math
 
 
 class MaskedDiffusionScheduler:
-    """
-    Supports both continuous (Gaussian) and discrete (masking) corruption.
-    Kuleshov et al. "Diffusion models for discrete data" (2022)
-    https://arxiv.org/abs/2208.04202
-    Austin et al. "Structured Denoising Diffusion Models in Discrete State-Spaces" for the original score based
-    https://arxiv.org/abs/2107.03006
-    Saharia et al. "Image Super-Resolution via Iterative Refinement"
-    https://arxiv.org/abs/2104.07636 for scheduling
-    """
-
     def __init__(
         self,
         num_steps: int = 1000,
@@ -32,9 +22,7 @@ class MaskedDiffusionScheduler:
         Different schedules from literature:
         - Linear: Austin et al. (2021) - simple baseline
         - Cosine: Nichol & Dhariwal (2021) "Improved DDPM"
-          https://arxiv.org/abs/2102.09672
         - Sqrt: Ramesh et al. (2022) DALL-E 2
-          https://arxiv.org/abs/2204.06125
 
 
         @param t: torch.Tensor representing Timesteps [B] in range [0, 1]
@@ -88,4 +76,3 @@ class MaskedDiffusionScheduler:
             x_masked = x * (~corrupt_mask).unsqueeze(-1).float()
 
         return x_masked, corrupt_mask
-
