@@ -1,4 +1,4 @@
-DATASET_ROOT = "openslr/librispeech"
+DATASET_ROOT = "openslr/librispeech_asr"
 DATASET_SUBSETS = ["all", "clean", "other"]
 DATASET_SPLITS = [
     "test.clean",
@@ -18,6 +18,12 @@ EOS = "[EOS]"
 NUM_MELS = 128
 # From NVIDIA TacoTron2 params
 SAMPLE_RATE = 22050
+SYMBOLS = [
+    " ",  # space
+    *list("abcdefghijklmnopqrstuvwxyz'-"),
+    "[PAD]",
+    "[EOS]",
+]
 NUM_FFT = 2048
 NUM_STFT = int((NUM_FFT // 2) + 1)
 FRAME_SHIFT = 0.0125  # seconds
