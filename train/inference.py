@@ -8,22 +8,30 @@ from models.audio_encoder import AudioEncoder
 from models.embed import TextEmbedding
 from models.masked_diffusion_scheduler import MaskedDiffusionScheduler
 from models.pipeline import load_librispeech_samples, create_mels_batches
-from transformers import AutoTokenizer
-
+from tokenizers import Tokenizer
 
 #TODO: cleanup, written in a state of illness
 def inference(args):
     device = args.device
-    vocab_size = 50000
-    mask_token_id = vocab_size - 1
+    
+    # Load tokenizer
+    tokenizer_path = "Data/tokenizer.json"
+    tokenizer = Tokenizer.from_file(tokenizer_path)
+    vocab_size = tokenizer.get_vocab_size()
+    
+    mask_token_id = tokenizer.token_to_id("[MASK]")
+    if mask_token_id is None:
+        mask_token_id = vocab_size
+        vocab_size += 1
     
     audio_encoder = AudioEncoder(in_channels=1, dropout=0.1).to(device)
     text_embedder = TextEmbedding(vocab_size=vocab_size, embed_dim=args.d_model, max_seq_len=512).to(device)
     model = MambaDenoiser(
         text_dim=args.d_model,
         d_model=args.d_model,
-        audio_channels=args.d_model,
-        n_layers=args.n_layers
+        audio_channels=128,
+        n_layers=args.n_layers,
+        mask_token_id=mask_token_id
     ).to(device)
     
     scheduler = MaskedDiffusionScheduler(
@@ -42,6 +50,7 @@ def inference(args):
     audio_encoder.eval()
     text_embedder.eval()
 
+    #TODO: plug in parker's pipeline here wherever it is. 
     print("Loading test audio...")
     samples, texts, srs = load_librispeech_samples(num_samples=1, split="test.clean")
     sample = samples[0]
@@ -91,8 +100,7 @@ def inference(args):
         logits = torch.matmul(x_t, emb_weights.t())
         predicted_ids = torch.argmax(logits, dim=-1)
         
-        tokenizer = AutoTokenizer.from_pretrained("google/gemma-2-2b-it")
-        predicted_text = tokenizer.decode(predicted_ids[0], skip_special_tokens=True)
+        predicted_text = tokenizer.decode(predicted_ids[0].tolist(), skip_special_tokens=True)
         
         print(f"\nGround Truth: {ground_truth}")
         print(f"Predicted:    {predicted_text}")
