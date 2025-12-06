@@ -9,6 +9,8 @@ from models.embed import TextEmbedding
 from models.masked_diffusion_scheduler import MaskedDiffusionScheduler
 from models.pipeline import load_librispeech_samples, create_mels_batches
 from tokenizers import Tokenizer
+from utils.metrics import calculate_wer, calculate_cer
+from utils.consts import PAD
 
 #TODO: cleanup, written in a state of illness
 def inference(args):
@@ -19,6 +21,11 @@ def inference(args):
     tokenizer = Tokenizer.from_file(tokenizer_path)
     vocab_size = tokenizer.get_vocab_size()
     
+    pad_token_id = tokenizer.token_to_id(PAD)
+    if pad_token_id is None:
+        pad_token_id = vocab_size
+        vocab_size += 1
+
     mask_token_id = tokenizer.token_to_id("[MASK]")
     if mask_token_id is None:
         mask_token_id = vocab_size
@@ -104,6 +111,11 @@ def inference(args):
         
         print(f"\nGround Truth: {ground_truth}")
         print(f"Predicted:    {predicted_text}")
+        
+        wer = calculate_wer(ground_truth, predicted_text)
+        cer = calculate_cer(ground_truth, predicted_text)
+        print(f"WER: {wer:.2f}%")
+        print(f"CER: {cer:.2f}%")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

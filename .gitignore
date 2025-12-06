@@ -3,3 +3,4 @@
 Data/
 .idea/*
 venv/
+*.pt
