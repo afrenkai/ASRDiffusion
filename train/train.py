@@ -17,9 +17,9 @@ from tokenizers import Tokenizer
 # Added imports by AT
 from dataset.dataloader import LibriSpeechDataset, get_data_loader
 from datasets import load_dataset
-from utils.consts import PAD
+from utils.consts import DATASET_ROOT, DATASET_SPLITS, DATASET_SUBSETS ,PAD
 from utils.metrics import WERMetric
-
+from dataset.ds_utils import ds_use
 
 # TODO: handle device mismatches preemptively here, do NOT want to be walkint through call stacks later
 
@@ -78,9 +78,9 @@ def train(args):
         print(
             "[INFO] Sample mode active: using hf-internal-testing/librispeech_asr_demo"
         )
-        hf_train = load_dataset(
-            "hf-internal-testing/librispeech_asr_demo", split="validation"
-        )
+        #hf_train = load_dataset("hf-internal-testing/librispeech_asr_demo", split="validation")
+        hf_ds = ds_use(sample=True)
+        hf_train = hf_ds[("validation", None)]
         hf_val = hf_train # Use same for sample mode
         args.batch_size = min(2, args.batch_size)
         args.epochs = 10
@@ -88,8 +88,13 @@ def train(args):
         args.num_steps = 10
     else:
         print("Loading data...")
-        hf_train = load_dataset("openslr/librispeech_asr", "clean", "train.100")
-        hf_val = load_dataset("openslr/librispeech_asr", "clean", "validation.clean")
+        #hf_train = load_dataset("openslr/librispeech_asr", "clean", "train.100")
+        hf_ds = ds_use(root=DATASET_ROOT, split="train.100", subset=DATASET_SUBSETS[1])
+        hf_train = hf_ds[("train.100", DATASET_SUBSETS[1])]
+
+        #hf_val = load_dataset("openslr/librispeech_asr", "clean", "validation.clean")
+        val_ds = ds_use(root=DATASET_ROOT, split="validation.clean", subset=DATASET_SUBSETS[1])
+        hf_val = val_ds[("validation.clean", DATASET_SUBSETS[1])]
 
     def tokenize_fn(text):
         return torch.tensor(tokenizer.encode(text).ids, dtype=torch.long)

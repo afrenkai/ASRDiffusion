@@ -6,8 +6,11 @@ from utils.consts import NUM_MELS
 from dataset.conversion_utils import SpeechConverter
 import torch
 from utils.reproducibility import set_seed
-from datasets import load_dataset
 
+#ds_utils swap
+from datasets import load_dataset
+from dataset.ds_utils import ds_use
+from utils.consts import DATASET_SUBSETS
 
 audio_encoder = AudioEncoder(in_channels=1, dropout=0.0)
 speech_converter = SpeechConverter(num_mels=NUM_MELS)
@@ -20,7 +23,10 @@ def load_librispeech_samples(num_samples=5, split="test.clean"):
     texts = []
 
     print(f"Loading {num_samples} samples from LibriSpeech {split} (streaming)...")
-    ds = load_dataset("openslr/librispeech_asr", split=split, streaming=True)
+    #ds = load_dataset("openslr/librispeech_asr", split=split, streaming=True)
+    ds_dict = ds_use(splir=split, subset=DATASET_SUBSETS[0], streaming=True)
+    ds = [(split, DATASET_SUBSETS[0])]
+
     for i, item in enumerate(ds):
         if i >= num_samples:
             break

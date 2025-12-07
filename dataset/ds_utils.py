@@ -2,7 +2,7 @@ from datasets import load_dataset
 from utils.consts import DATASET_ROOT, DATASET_SPLITS, DATASET_SUBSETS 
 import argparse
 
-def ds_use(root: str = DATASET_ROOT, split: str | list[str] = DATASET_SPLITS[0], subset: str | list[str] = DATASET_SUBSETS[0], streaming: bool = False) -> None:
+def ds_use(root: str = DATASET_ROOT, split: str | list[str] = DATASET_SPLITS[0], subset: str | list[str] = DATASET_SUBSETS[0], streaming: bool = False, sample: bool = False) -> None:
     """
     gets hf dataset for local use. look in utils/consts.py for what the consts contain for librispeech. 
     if streaming enabled, doesn't download the dataset and instead creates an IterableDataset object. Look at
@@ -10,7 +10,7 @@ def ds_use(root: str = DATASET_ROOT, split: str | list[str] = DATASET_SPLITS[0],
     """
 
     #handle --sample
-    if args.sample:
+    if sample:
         root = "hf-internal-testing/librispeech_asr_demo"
         split = ["validation"]
         subset = [None]
@@ -53,3 +53,9 @@ if __name__ == "__main__":
     print(f"{"streaming" if args.streaming else "loading"} the split(s) of {args.splits} with subsets {args.subset} from {args.root}...")
     ds_dict = ds_use(args.root, args.splits, args.subset, args.streaming)
     print("Loaded datasets:", list(ds_dict.keys()))
+
+    hf_train = ds_dict[("validation", None)]
+
+    print("Type of hf_train:", type(hf_train))
+    print("Example element:", hf_train[0])
+    print("Keys in dataset item:", hf_train[0].keys())
