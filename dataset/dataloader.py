@@ -1,9 +1,7 @@
 import torch
-from torch.utils.data import Dataset, DataLoader
-from torchaudio import load
-from torchaudio.transforms import MelSpectrogram
+from torch.utils.data import Dataset, DataLoader, DistributedSampler
 from torch.nn.utils.rnn import pad_sequence
-from datasets import Dataset as HFDataset, load_dataset
+from datasets import Dataset as HFDataset
 from utils.consts import (NUM_MELS, DATASET_TEXT_COL, PAD)
 from dataset.conversion_utils import SpeechConverter
 from dataset.ds_utils import ds_use
@@ -96,18 +94,51 @@ class SpeechCollate:
 
         return padded_text_seqs, text_seq_lens, padded_mel_specs, mel_spec_lens, stop_token_targets
 
-def get_data_loader(dataset: HFDataset, batch_size, shuffle=True, num_workers=0, pad_token_id=0) -> DataLoader:
+def get_data_loader(dataset: HFDataset, batch_size, shuffle=True, num_workers=0, pad_token_id=0, sampler=None) -> DataLoader:
     collate_fn = SpeechCollate(pad_token_id=pad_token_id)
-    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_fn, 
-                      num_workers=num_workers)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=(shuffle and sampler is None), collate_fn=collate_fn, 
+                      num_workers=num_workers, sampler=sampler, pin_memory=True)
 
-def load_data(batch_size, mel_bins=NUM_MELS, subsample_ratio=None):
-    #TODO: write this to use the new dataset and convert datasets to dataloader
-    train_ds = None
-    val_ds = None
-    test_ds = None
-    train_dl = get_data_loader(train_ds, batch_size, num_workers=3)
-    val_dl = get_data_loader(val_ds, batch_size, shuffle=False, num_workers=1)
-    test_dl = get_data_loader(test_ds, batch_size, shuffle=False, num_workers=1)
-    return train_dl, val_dl, test_dl
+def load_data(batch_size, tokenizer, sample=False, num_workers=2, distributed=False):
+    pad_token_id = tokenizer.token_to_id(PAD)
+    if pad_token_id is None:
+        pad_token_id = 0
+
+    def tokenize_fn(text):
+        return torch.tensor(tokenizer.encode(text).ids, dtype=torch.long)
+
+    if sample:
+        datasets = ds_use(sample=True)
+        hf_train = datasets[('validation', None)]
+        hf_val = hf_train
+    else:
+        datasets = ds_use(split=["train.100", "validation.clean"], subset="clean")
+        hf_train = datasets[("train.100", "clean")]
+        hf_val = datasets[("validation.clean", "clean")]
+
+    train_ds = LibriSpeechDataset(hf_train, tokenization_method=tokenize_fn)
+    val_ds = LibriSpeechDataset(hf_val, tokenization_method=tokenize_fn)
+
+    train_sampler = DistributedSampler(train_ds) if distributed else None
+    val_sampler = DistributedSampler(val_ds, shuffle=False) if distributed else None
+
+    train_dl = get_data_loader(
+        train_ds,
+        batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pad_token_id=pad_token_id,
+        sampler=train_sampler
+    )
+    
+    val_dl = get_data_loader(
+        val_ds,
+        batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pad_token_id=pad_token_id,
+        sampler=val_sampler
+    )
+    
+    return train_dl, val_dl
 
