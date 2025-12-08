@@ -34,8 +34,7 @@ class MaskGitSampler:
         
         print(f"Starting generation with {num_steps} steps...")
         
-        # Get embedding weights for logit projection
-        # [Vocab, Embed]
+        # Get embedding weights for logit projection of size [Vocab, Embed]
         emb_weights = self.text_embedder.tok_emb.weight
         mask_token_emb = self.text_embedder.tok_emb(
             torch.tensor(self.mask_token_id, device=self.device)
@@ -47,10 +46,10 @@ class MaskGitSampler:
             (padded_text_seqs, _, padded_mel_specs, _, _) = batch
             
             batch_size = padded_text_seqs.size(0)
-            # In a real inference scenario without ground truth, we would need to:
-            # 1. Predict length, or
-            # 2. Use a fixed max length (e.g. 512) and truncate at [EOS]
-            # Here we use the ground truth length for validation parity.
+            '''
+            In a real inference scenario without ground truth, we would need to use a fixed max length (e.g. 512) 
+            and truncate at [EOS] after generation.
+            '''
             seq_len = padded_text_seqs.size(1) 
             
             mel_batch = padded_mel_specs.to(self.device).unsqueeze(1)
@@ -58,39 +57,35 @@ class MaskGitSampler:
             with autocast('cuda', enabled=(self.device == 'cuda')):
                 audio_features = self.audio_encoder(mel_batch)
                 
-                # Initialize with all [MASK] tokens
-                # [B, S]
+                # creates seq of [MASK] tokens of shape [B, S]
                 current_ids = torch.full((batch_size, seq_len), self.mask_token_id, device=self.device, dtype=torch.long)
                 x_t, _ = self.text_embedder(current_ids, None)
                 
-                # Timesteps: 1.0 -> 0.0
-                # We use num_steps iterations
+                # Timesteps: 1.0 -> 0.0. We use num_steps iterations
                 timesteps = torch.linspace(1, 0, num_steps, device=self.device)
                 
                 for i, t_val in enumerate(tqdm(timesteps, desc=f"Batch {batch_idx+1} Sampling")):
                     t = torch.full((batch_size,), t_val.item(), device=self.device)
                     
-                    # 1. Predict x_0 (embeddings) from current masked state
+                    # Predict x_0 (embeddings) from current masked state
                     x_0_pred = self.model(x_t, t, audio_features)
                     
-                    # 2. Project to logits to get probabilities
                     # x_0_pred: [B, S, E] @ [E, V] -> [B, S, V]
                     logits = torch.matmul(x_0_pred, emb_weights.t())
                     probs = F.softmax(logits / temperature, dim=-1)
                     
-                    # 3. Sample tokens from the distribution
+                    # Sample tokens from the distribution
                     # [B, S]
-                    # Using multinomial sampling allows for diversity, argmax is greedy
+                    # Using multinomial sampling allows for diversity since argmax is by definition greedy
                     if temperature < 1e-5:
                         sampled_ids = torch.argmax(logits, dim=-1)
                     else:
                         sampled_ids = torch.multinomial(probs.view(-1, probs.size(-1)), 1).view(batch_size, seq_len)
                     
-                    # 4. Get confidence scores (probability of the sampled token)
-                    # gather: [B, S]
+                    # Get confidence scores (probability of the sampled token). gathering makes it of size [B, S]
                     confidence = torch.gather(probs, -1, sampled_ids.unsqueeze(-1)).squeeze(-1)
                     
-                    # 5. Determine masking ratio for NEXT step
+                    
                     if i < num_steps - 1:
                         t_next = timesteps[i+1]
                         
@@ -102,7 +97,7 @@ class MaskGitSampler:
                         # Number of tokens to mask
                         num_to_mask = int(mask_ratio * seq_len)
                         
-                        # 6. Mask the lowest confidence tokens (MaskGIT strategy)
+                        # Mask the lowest confidence tokens (MaskGIT strategy)
                         # We keep the (seq_len - num_to_mask) tokens with highest confidence.
                         # So we mask the 'num_to_mask' tokens with lowest confidence.
                         
@@ -114,11 +109,10 @@ class MaskGitSampler:
                         mask = torch.zeros((batch_size, seq_len), dtype=torch.bool, device=self.device)
                         mask.scatter_(1, mask_indices, True)
                         
-                        # 7. Update x_t for next iteration
+                        # Update x_t for next iteration
                         # Where mask is True -> [MASK] embedding
                         # Where mask is False -> Embedding of sampled_ids (the "kept" tokens)
-                        
-                        # Construct next step token ids
+
                         next_ids = sampled_ids.clone()
                         next_ids[mask] = self.mask_token_id
                         
@@ -126,18 +120,16 @@ class MaskGitSampler:
                         x_t, _ = self.text_embedder(next_ids, None)
                         
                     else:
-                        # Final step, just take the sampled ids
+
                         final_ids = sampled_ids
 
-            # Decode and print results
             predictions = []
             references = []
             
             print("\n" + "="*50)
             for j in range(batch_size):
                 pred_seq = final_ids[j].tolist()
-                
-                # Truncate at EOS if present
+      
                 if self.eos_token_id in pred_seq:
                     eos_idx = pred_seq.index(self.eos_token_id)
                     pred_seq = pred_seq[:eos_idx]
@@ -172,7 +164,6 @@ def inference(args):
     print(f"Vocab size: {vocab_size}")
     print(f"Special tokens: {token_ids}")
 
-    # Initialize Models
     audio_encoder = AudioEncoder(in_channels=1, dropout=0.1).to(device)
     text_embedder = TextEmbedding(
         vocab_size=vocab_size, 
@@ -232,7 +223,6 @@ def inference(args):
 
 
 if __name__ == "__main__":
-    # Set matmul precision for Ampere+ GPUs
     torch.set_float32_matmul_precision('high')
 
     parser = argparse.ArgumentParser()
