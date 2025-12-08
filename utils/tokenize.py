@@ -21,6 +21,7 @@ def build_tokenizer_vocab(
     vocab_size: int,
     min_freq: int,
     files: Optional[str | list[str]] = None,
+    iterator=None,
     save_dir: Optional[str] = None,
 ):
     """
@@ -48,6 +49,11 @@ def build_tokenizer_vocab(
 
     if files:
         tok.train(files, trainer)
+    elif iterator:
+        tok.train_from_iterator(iterator, trainer)
+    else:
+        raise ValueError("Either files or iterator must be provided")
+
     # print(save_path)
     if save_dir:
         os.makedirs(save_dir, exist_ok=True)
@@ -55,6 +61,32 @@ def build_tokenizer_vocab(
         tok.save(fpath)
 
     return tok
+
+
+def load_tokenizer(path: str = "tokenizer/tokenizer.json") -> Tokenizer:
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Tokenizer file not found at {path}")
+
+    tokenizer = Tokenizer.from_file(path)
+    vocab_size = tokenizer.get_vocab_size()
+
+    special_tokens = {
+        "pad": PAD,
+        "eos": EOS,
+        "mask": "[MASK]",
+    }
+
+    token_ids = {}
+
+    for name, token in special_tokens.items():
+        tid = tokenizer.token_to_id(token)
+        if tid is None:
+            print(f"Warning: {token} token not found in tokenizer. Adding it.")
+            tokenizer.add_tokens([token])
+            tid = tokenizer.token_to_id(token)
+        token_ids[name] = tid
+
+    return tokenizer, token_ids
 
 
 if __name__ == "__main__":
@@ -77,8 +109,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dataset_split",
         type=str,
-        help="Dataset split to use for training (e.g., 'train.clean.100')",
-        default="train.clean.100",
+        help="Dataset split to use for training (e.g., 'train.100')",
+        default="train.100",
     )
     parser.add_argument(
         "--text_col",
@@ -90,7 +122,7 @@ if __name__ == "__main__":
         "--vocab_size",
         type=int,
         help="Max size of the vocab for the tokenizer to use",
-        default=5000,
+        default=50000,
         # required=True,
     )
     parser.add_argument(
@@ -109,7 +141,7 @@ if __name__ == "__main__":
         "--save_dir",
         type=str,
         help="Path to save the tokenizer JSON file",
-        default=DATADIR,
+        default='tokenizer',
     )
 
     args = parser.parse_args()
@@ -120,8 +152,21 @@ if __name__ == "__main__":
         f"Training BPE tokenizer with vocab_size={args.vocab_size}, min_freq={args.min_freq}"
     )
 
+    iterator = None
     if not args.files:
-        raise ValueError("pass in local files to use for tokenization")
+        from dataset.ds_utils import ds_use
+        print("No files provided, loading from HF dataset...")
+        # Default to train.100 for tokenizer training if not specified
+        ds_dict = ds_use(split=args.dataset_split, subset="clean")
+        ds = ds_dict[(args.dataset_split, "clean")]
+        
+        def batch_iterator():
+            batch_size = 1000
+            for i in range(0, len(ds), batch_size):
+                yield ds[i : i + batch_size]["text"]
+        
+        iterator = batch_iterator()
+
     if args.save_dir:
         save_location = args.save_dir
     else:
@@ -134,6 +179,7 @@ if __name__ == "__main__":
         vocab_size=args.vocab_size,
         min_freq=args.min_freq,
         files=args.files,
+        iterator=iterator,
         save_dir=save_location,
     )
 

@@ -6,11 +6,12 @@
 #SBATCH -p short
 #SBATCH -t 12:00:00
 #SBATCH -e "asr_diff_%j_err.txt"
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:2
 #SBATCH -C H100|L40S|H100
 #SBATCH --output=asr_diff_%j_log.txt
 set -e
-
+#defaults to 2 as with the gres above, but can be overridden with first arg
+NUM_GPUS=${1:-2}
 
 module load cuda
 
@@ -21,10 +22,23 @@ fi
 
 #assumes this is run from scripts/. if base, just remove the ../
 if [ ! -d "../Data/" ]; then
-  uv run -m dataset.ds_utils
+  uv run -m dataset.ds_utils \
+    --splits train.clean.100 validation.clean \
+    --subset clean
   echo "fetched dataset"
 else
   echo "already have the dataset, skipping ..."
 fi
 
-#TODO: add like training code, preprocessing, etc... 
+
+echo "Starting Distributed Training on $NUM_GPUS GPUs"
+uv run torchrun \
+    --nproc_per_node=$NUM_GPUS \
+    --standalone \
+    -m train.train \
+    --batch_size 16 \
+    --epochs 10 \
+    --lr 1e-4 \
+    --d_model 256 \
+    --n_layers 4 \
+    --num_steps 1000

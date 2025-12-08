@@ -1,46 +1,193 @@
-import os
-import sys
 import torch
 import argparse
-import numpy as np
+import torch.nn.functional as F
+from torch.amp import autocast
+from tqdm import tqdm
 from models.mamba_denoiser import MambaDenoiser
 from models.audio_encoder import AudioEncoder
 from models.embed import TextEmbedding
 from models.masked_diffusion_scheduler import MaskedDiffusionScheduler
-from models.pipeline import load_librispeech_samples, create_mels_batches
-from tokenizers import Tokenizer
-from utils.metrics import calculate_wer, calculate_cer
-from utils.consts import PAD
+from dataset.dataloader import load_data
+from utils.consts import PAD, EOS
+from utils.metrics import WERMetric
+from utils.tokenize import load_tokenizer
 
-#TODO: cleanup, written in a state of illness
+
+class MaskGitSampler:
+    def __init__(self, model, audio_encoder, text_embedder, scheduler, tokenizer, device, mask_token_id, eos_token_id):
+        self.model = model
+        self.audio_encoder = audio_encoder
+        self.text_embedder = text_embedder
+        self.scheduler = scheduler
+        self.tokenizer = tokenizer
+        self.device = device
+        self.mask_token_id = mask_token_id
+        self.eos_token_id = eos_token_id
+
+    @torch.inference_mode()
+    def generate(self, val_loader, num_steps=20, temperature=1.0, num_batches=None):
+        self.model.eval()
+        self.audio_encoder.eval()
+        self.text_embedder.eval()
+        
+        metric = WERMetric()
+        
+        print(f"Starting generation with {num_steps} steps...")
+        
+        # Get embedding weights for logit projection
+        # [Vocab, Embed]
+        emb_weights = self.text_embedder.tok_emb.weight
+        mask_token_emb = self.text_embedder.tok_emb(
+            torch.tensor(self.mask_token_id, device=self.device)
+        ).view(1, 1, -1)
+
+        for batch_idx, batch in enumerate(val_loader):
+            if num_batches is not None and batch_idx >= num_batches: break
+            
+            (padded_text_seqs, _, padded_mel_specs, _, _) = batch
+            
+            batch_size = padded_text_seqs.size(0)
+            # In a real inference scenario without ground truth, we would need to:
+            # 1. Predict length, or
+            # 2. Use a fixed max length (e.g. 512) and truncate at [EOS]
+            # Here we use the ground truth length for validation parity.
+            seq_len = padded_text_seqs.size(1) 
+            
+            mel_batch = padded_mel_specs.to(self.device).unsqueeze(1)
+            
+            with autocast('cuda', enabled=(self.device == 'cuda')):
+                audio_features = self.audio_encoder(mel_batch)
+                
+                # Initialize with all [MASK] tokens
+                # [B, S]
+                current_ids = torch.full((batch_size, seq_len), self.mask_token_id, device=self.device, dtype=torch.long)
+                x_t, _ = self.text_embedder(current_ids, None)
+                
+                # Timesteps: 1.0 -> 0.0
+                # We use num_steps iterations
+                timesteps = torch.linspace(1, 0, num_steps, device=self.device)
+                
+                for i, t_val in enumerate(tqdm(timesteps, desc=f"Batch {batch_idx+1} Sampling")):
+                    t = torch.full((batch_size,), t_val.item(), device=self.device)
+                    
+                    # 1. Predict x_0 (embeddings) from current masked state
+                    x_0_pred = self.model(x_t, t, audio_features)
+                    
+                    # 2. Project to logits to get probabilities
+                    # x_0_pred: [B, S, E] @ [E, V] -> [B, S, V]
+                    logits = torch.matmul(x_0_pred, emb_weights.t())
+                    probs = F.softmax(logits / temperature, dim=-1)
+                    
+                    # 3. Sample tokens from the distribution
+                    # [B, S]
+                    # Using multinomial sampling allows for diversity, argmax is greedy
+                    if temperature < 1e-5:
+                        sampled_ids = torch.argmax(logits, dim=-1)
+                    else:
+                        sampled_ids = torch.multinomial(probs.view(-1, probs.size(-1)), 1).view(batch_size, seq_len)
+                    
+                    # 4. Get confidence scores (probability of the sampled token)
+                    # gather: [B, S]
+                    confidence = torch.gather(probs, -1, sampled_ids.unsqueeze(-1)).squeeze(-1)
+                    
+                    # 5. Determine masking ratio for NEXT step
+                    if i < num_steps - 1:
+                        t_next = timesteps[i+1]
+                        
+                        # Get masking rate for t_next (e.g. cosine schedule)
+                        # We want to know what percentage of tokens should be masked at the NEXT step.
+                        # t=1 -> 100% masked, t=0 -> 0% masked
+                        mask_ratio = self.scheduler.get_masking_rate(torch.tensor([t_next], device=self.device)).item()
+                        
+                        # Number of tokens to mask
+                        num_to_mask = int(mask_ratio * seq_len)
+                        
+                        # 6. Mask the lowest confidence tokens (MaskGIT strategy)
+                        # We keep the (seq_len - num_to_mask) tokens with highest confidence.
+                        # So we mask the 'num_to_mask' tokens with lowest confidence.
+                        
+                        # torch.topk with largest=False gives smallest values (lowest confidence)
+                        # values, indices = topk(...)
+                        _, mask_indices = torch.topk(confidence, num_to_mask, dim=1, largest=False)
+                        
+                        # Create boolean mask [B, S]
+                        mask = torch.zeros((batch_size, seq_len), dtype=torch.bool, device=self.device)
+                        mask.scatter_(1, mask_indices, True)
+                        
+                        # 7. Update x_t for next iteration
+                        # Where mask is True -> [MASK] embedding
+                        # Where mask is False -> Embedding of sampled_ids (the "kept" tokens)
+                        
+                        # Construct next step token ids
+                        next_ids = sampled_ids.clone()
+                        next_ids[mask] = self.mask_token_id
+                        
+                        # Re-embed to get PE
+                        x_t, _ = self.text_embedder(next_ids, None)
+                        
+                    else:
+                        # Final step, just take the sampled ids
+                        final_ids = sampled_ids
+
+            # Decode and print results
+            predictions = []
+            references = []
+            
+            print("\n" + "="*50)
+            for j in range(batch_size):
+                pred_seq = final_ids[j].tolist()
+                
+                # Truncate at EOS if present
+                if self.eos_token_id in pred_seq:
+                    eos_idx = pred_seq.index(self.eos_token_id)
+                    pred_seq = pred_seq[:eos_idx]
+                
+                pred_text = self.tokenizer.decode(pred_seq, skip_special_tokens=True)
+                ref_text = self.tokenizer.decode(padded_text_seqs[j].tolist(), skip_special_tokens=True)
+                predictions.append(pred_text)
+                references.append(ref_text)
+                print(f"Ref:  {ref_text}")
+                print(f"Pred: {pred_text}")
+                print("-" * 20)
+            print("="*50 + "\n")
+            
+            metric.update(predictions, references)
+            
+        wer = metric.total_wer / metric.count if metric.count > 0 else 0.0
+        cer = metric.total_cer / metric.count if metric.count > 0 else 0.0
+        print(f"Final WER: {wer:.2f}")
+        print(f"Final CER: {cer:.2f}")
+
+
 def inference(args):
     device = args.device
-    
-    # Load tokenizer
-    tokenizer_path = "Data/tokenizer.json"
-    tokenizer = Tokenizer.from_file(tokenizer_path)
+    tokenizer_path = "tokenizer/tokenizer.json"
+    tokenizer, token_ids = load_tokenizer(tokenizer_path)
     vocab_size = tokenizer.get_vocab_size()
     
-    pad_token_id = tokenizer.token_to_id(PAD)
-    if pad_token_id is None:
-        pad_token_id = vocab_size
-        vocab_size += 1
-
-    mask_token_id = tokenizer.token_to_id("[MASK]")
-    if mask_token_id is None:
-        mask_token_id = vocab_size
-        vocab_size += 1
+    pad_token_id = token_ids["pad"]
+    mask_token_id = token_ids["mask"]
+    eos_token_id = token_ids["eos"]
     
+    print(f"Vocab size: {vocab_size}")
+    print(f"Special tokens: {token_ids}")
+
+    # Initialize Models
     audio_encoder = AudioEncoder(in_channels=1, dropout=0.1).to(device)
-    text_embedder = TextEmbedding(vocab_size=vocab_size, embed_dim=args.d_model, max_seq_len=512).to(device)
+    text_embedder = TextEmbedding(
+        vocab_size=vocab_size, 
+        embed_dim=args.d_model, 
+        max_seq_len=512
+    ).to(device)
+    
     model = MambaDenoiser(
         text_dim=args.d_model,
         d_model=args.d_model,
         audio_channels=128,
         n_layers=args.n_layers,
-        mask_token_id=mask_token_id
+        mask_token_id=mask_token_id,
     ).to(device)
-    
+
     scheduler = MaskedDiffusionScheduler(
         num_steps=args.num_steps,
         masking_schedule="cosine"
@@ -49,81 +196,56 @@ def inference(args):
     if args.checkpoint:
         print(f"Loading checkpoint from {args.checkpoint}")
         checkpoint = torch.load(args.checkpoint, map_location=device)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        audio_encoder.load_state_dict(checkpoint['audio_encoder_state_dict'])
-        text_embedder.load_state_dict(checkpoint['text_embedder_state_dict'])
-    
-    model.eval()
-    audio_encoder.eval()
-    text_embedder.eval()
+        
+        def load_state_dict_safe(model, state_dict):
+            new_state_dict = {}
+            for k, v in state_dict.items():
+                if k.startswith("module."):
+                    new_state_dict[k[7:]] = v
+                else:
+                    new_state_dict[k] = v
+            model.load_state_dict(new_state_dict)
 
-    #TODO: plug in parker's pipeline here wherever it is. 
-    print("Loading test audio...")
-    samples, texts, srs = load_librispeech_samples(num_samples=1, split="test.clean")
-    sample = samples[0]
-    ground_truth = texts[0]
-    
-    mel_batch = create_mels_batches([sample]).to(device)
-    
-    with torch.no_grad():
-        audio_features = audio_encoder(mel_batch)
-        #TODO: replace with MASK id from text embedder 
-        # Estimate length: heuristic based on audio length (e.g., 100ms per token probably wrong idk) or some fixed interval
-        seq_len = len(ground_truth.split()) + 5 # Simple heuristic that is a pos but good enough for this demo
-        # tokenizer should actually have a MASK token id to use here
-        batch_size = 1
-        
-        mask_token_emb = text_embedder.tok_emb(torch.tensor(mask_token_id, device=device)).view(1, 1, -1)
-        x_t = mask_token_emb.expand(batch_size, seq_len, -1).clone()
-        
-        print("Starting reverse diffusion...")
-        timesteps = torch.linspace(1, 0, args.num_steps, device=device)
-        
-        for i, t_val in enumerate(timesteps):
-            t = torch.full((batch_size,), t_val.item(), device=device)
+        load_state_dict_safe(model, checkpoint['model_state_dict'])
+        load_state_dict_safe(audio_encoder, checkpoint['audio_encoder_state_dict'])
+        load_state_dict_safe(text_embedder, checkpoint['text_embedder_state_dict'])
+    else:
+        print("Warning: No checkpoint provided. Using random weights.")
 
-            # Note: corrupt_mask is technically not needed for inference if model doesn't enforce it, 
-            # but we can pass all ones if needed or None. MambaDenoiser docstring says optional.
-            x_0_pred = model(x_t, t, audio_features)
-            
-            # Re-mask to t_next (t - 1/steps)
-            if i < len(timesteps) - 1:
-                t_next = timesteps[i+1]
-                t_next_batch = torch.full((batch_size,), t_next.item(), device=device)
-                
-            #x_{t-1} ~ q(x_{t-1} | x_0_pred)
-                x_t, _ = scheduler.apply_masking(x_0_pred, t_next_batch, mask_value=mask_token_emb)
-            else:
-                x_t = x_0_pred
+    if hasattr(torch, 'compile'):
+        print("Compiling model with torch.compile...")
+        model = torch.compile(model)
+        audio_encoder = torch.compile(audio_encoder)
+        text_embedder = torch.compile(text_embedder)
 
-        # KNN lol
-        emb_weights = text_embedder.tok_emb.weight # [Vocab, E]
-        
-        # x_t: [1, S, E]
-        # dist: [1, S, Vocab]
-        # We want to find argmin ||x_t - emb||^2 = ||x_t||^2 + ||emb||^2 - 2 <x_t, emb>
-        # Equivalent to argmax <x_t, emb> if embeddings are normalized
-        
-        logits = torch.matmul(x_t, emb_weights.t())
-        predicted_ids = torch.argmax(logits, dim=-1)
-        
-        predicted_text = tokenizer.decode(predicted_ids[0].tolist(), skip_special_tokens=True)
-        
-        print(f"\nGround Truth: {ground_truth}")
-        print(f"Predicted:    {predicted_text}")
-        
-        wer = calculate_wer(ground_truth, predicted_text)
-        cer = calculate_cer(ground_truth, predicted_text)
-        print(f"WER: {wer:.2f}%")
-        print(f"CER: {cer:.2f}%")
+    print(f"Loading data (split={args.split})...")
+    _, val_dl = load_data(
+        batch_size=args.batch_size, 
+        tokenizer=tokenizer, 
+        sample=args.sample,
+        num_workers=1,
+        val_split=args.split
+    )
+
+    sampler = MaskGitSampler(model, audio_encoder, text_embedder, scheduler, tokenizer, device, mask_token_id, eos_token_id)
+    sampler.generate(val_dl, num_steps=args.num_steps, temperature=args.temperature, num_batches=args.num_batches)
+
 
 if __name__ == "__main__":
+    # Set matmul precision for Ampere+ GPUs
+    torch.set_float32_matmul_precision('high')
+
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", type=str, default=None)
+    parser.add_argument("--batch_size", type=int, default=1)
+    parser.add_argument("--num_batches", type=int, default=None, help="Number of batches to process (default: all)")
     parser.add_argument("--d_model", type=int, default=256)
     parser.add_argument("--n_layers", type=int, default=4)
-    parser.add_argument("--num_steps", type=int, default=20)
+    parser.add_argument("--num_steps", type=int, default=20, help="Number of sampling steps")
+    parser.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature")
+    parser.add_argument("--checkpoint", type=str, default=None, help="Path to checkpoint")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--sample", action="store_true", help="Use sample dataset")
+    parser.add_argument("--split", type=str, default="test", help="Dataset split to use (e.g. test, validation)")
     
     args = parser.parse_args()
     inference(args)

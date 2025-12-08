@@ -1,11 +1,10 @@
-from models.pipeline import pipeline, load_librispeech_samples
 from transformers import AutoTokenizer
 import torch
 import torch.nn as nn
 import math
 import torch.nn.functional as F
 from models.masked_diffusion_scheduler import MaskedDiffusionScheduler
-from models.mamba_block import MambaBlock
+from models.bidirectional_mamba import BidirectionalMambaBlock
 from utils.consts import EPS
 
 
@@ -87,7 +86,7 @@ class MambaDenoiser(nn.Module):
         self.ln_cross = nn.LayerNorm(d_model)
         self.mamba_blocks = nn.ModuleList(
             [
-                MambaBlock(
+                BidirectionalMambaBlock(
                     d_model=d_model,
                     d_state=d_state,
                     d_conv=d_conv,

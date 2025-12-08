@@ -2,22 +2,24 @@ import torch
 from torch.utils.data import Dataset, DataLoader, DistributedSampler
 from torch.nn.utils.rnn import pad_sequence
 from datasets import Dataset as HFDataset
-from utils.consts import (NUM_MELS, DATASET_TEXT_COL, PAD)
+from utils.consts import (NUM_MELS, DATASET_TEXT_COL, PAD, EOS)
 from dataset.conversion_utils import SpeechConverter
 from dataset.ds_utils import ds_use
 from typing import Callable, Optional
+from utils.tokenize import load_tokenizer
 
 
 def BPE():
     pass
 
 class LibriSpeechDataset(Dataset):
-    def __init__(self, hf_ds: HFDataset, text_col: str=DATASET_TEXT_COL, mels: int = NUM_MELS, tokenization_method: Callable = None):
+    def __init__(self, hf_ds: HFDataset, text_col: str=DATASET_TEXT_COL, mels: int = NUM_MELS, tokenization_method: Callable = None, eos_token_id: int = None):
         self.hf_dataset = hf_ds
         self.num_mels = mels
         self.text_col = text_col
         self.tok_fn = tokenization_method
         self.speech_converter = SpeechConverter(self.num_mels)
+        self.eos_token_id = eos_token_id
 
     def __len__(self) -> int:
         return len(self.hf_dataset)
@@ -33,6 +35,8 @@ class LibriSpeechDataset(Dataset):
         # Apply text_to_seq_fn to the text
         if self.tok_fn:
             text_seq = self.tok_fn(text)
+            if self.eos_token_id is not None:
+                text_seq = torch.cat([text_seq, torch.tensor([self.eos_token_id], dtype=torch.long)])
         else:
             # Fallback or error? For now assuming tok_fn is always provided or we handle it
             raise ValueError("tokenization_method must be provided")
@@ -99,11 +103,12 @@ def get_data_loader(dataset: HFDataset, batch_size, shuffle=True, num_workers=0,
     return DataLoader(dataset, batch_size=batch_size, shuffle=(shuffle and sampler is None), collate_fn=collate_fn, 
                       num_workers=num_workers, sampler=sampler, pin_memory=True)
 
-def load_data(batch_size, tokenizer, sample=False, num_workers=2, distributed=False):
+def load_data(batch_size, tokenizer, sample=False, num_workers=2, distributed=False, val_split="validation"):
     pad_token_id = tokenizer.token_to_id(PAD)
-    if pad_token_id is None:
-        pad_token_id = 0
-
+    eos_token_id = tokenizer.token_to_id(EOS)
+    
+    if pad_token_id is None: pad_token_id = 0
+    
     def tokenize_fn(text):
         return torch.tensor(tokenizer.encode(text).ids, dtype=torch.long)
 
@@ -112,12 +117,12 @@ def load_data(batch_size, tokenizer, sample=False, num_workers=2, distributed=Fa
         hf_train = datasets[('validation', None)]
         hf_val = hf_train
     else:
-        datasets = ds_use(split=["train.100", "validation.clean"], subset="clean")
+        datasets = ds_use(split=["train.100", val_split], subset="clean")
         hf_train = datasets[("train.100", "clean")]
-        hf_val = datasets[("validation.clean", "clean")]
+        hf_val = datasets[(val_split, "clean")]
 
-    train_ds = LibriSpeechDataset(hf_train, tokenization_method=tokenize_fn)
-    val_ds = LibriSpeechDataset(hf_val, tokenization_method=tokenize_fn)
+    train_ds = LibriSpeechDataset(hf_train, tokenization_method=tokenize_fn, eos_token_id=eos_token_id)
+    val_ds = LibriSpeechDataset(hf_val, tokenization_method=tokenize_fn, eos_token_id=eos_token_id)
 
     train_sampler = DistributedSampler(train_ds) if distributed else None
     val_sampler = DistributedSampler(val_ds, shuffle=False) if distributed else None
