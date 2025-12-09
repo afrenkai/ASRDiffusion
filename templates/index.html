@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ASR Diffusion - Speech to Text</title>
+    <meta name="description" content="Transcribe speech to text using diffusion-based automatic speech recognition">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="background-gradient"></div>
+    
+    <main class="container">
+        <header class="header">
+            <div class="logo">
+                <div class="logo-icon">
+                    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z" fill="currentColor"/>
+                    </svg>
+                </div>
+                <h1>ASR Diffusion</h1>
+            </div>
+            <div class="device-badge">
+                <span class="device-indicator {{ 'gpu' if device == 'cuda' else 'cpu' }}"></span>
+                <span>{{ device.upper() }}</span>
+            </div>
+        </header>
+
+        <section class="upload-section">
+            <div class="upload-card">
+                <div class="upload-zone" id="uploadZone">
+                    <div class="upload-icon">
+                        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <path d="M12 16L12 8M12 8L8 12M12 8L16 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                            <path d="M3 16.5V18.75C3 19.9926 4.00736 21 5.25 21H18.75C19.9926 21 21 19.9926 21 18.75V16.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                    </div>
+                    <h2>Upload Audio</h2>
+                    <p>Drag & drop your audio file here or click to browse</p>
+                    <span class="file-types">Supports WAV, MP3, FLAC, OGG</span>
+                    <input type="file" id="audioInput" accept=".wav,.mp3,.flac,.ogg" hidden>
+                </div>
+
+                <div class="file-preview" id="filePreview">
+                    <div class="file-info">
+                        <div class="file-icon">
+                            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                <path d="M9 18V12L14 18V12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                            </svg>
+                        </div>
+                        <div class="file-details">
+                            <span class="file-name" id="fileName"></span>
+                            <span class="file-size" id="fileSize"></span>
+                        </div>
+                        <button class="remove-btn" id="removeFile">
+                            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                <path d="M18 6L6 18M6 6L18 18" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                            </svg>
+                        </button>
+                    </div>
+                    <audio id="audioPlayer" controls></audio>
+                </div>
+
+                <button class="transcribe-btn" id="transcribeBtn" disabled>
+                    <span class="btn-text">Transcribe Audio</span>
+                    <span class="btn-loader" hidden>
+                        <svg class="spinner" viewBox="0 0 24 24">
+                            <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" fill="none" stroke-linecap="round" stroke-dasharray="31.4 31.4" transform="rotate(-90 12 12)"/>
+                        </svg>
+                        <span>Processing...</span>
+                    </span>
+                </button>
+            </div>
+        </section>
+
+        <section class="result-section" id="resultSection">
+            <div class="result-card">
+                <div class="result-header">
+                    <h3>Transcription Result</h3>
+                    <button class="copy-btn" id="copyBtn" title="Copy to clipboard">
+                        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <rect x="8" y="8" width="12" height="12" rx="2" stroke="currentColor" stroke-width="2"/>
+                            <path d="M16 8V6C16 4.89543 15.1046 4 14 4H6C4.89543 4 4 4.89543 4 6V14C4 15.1046 4.89543 16 6 16H8" stroke="currentColor" stroke-width="2"/>
+                        </svg>
+                    </button>
+                </div>
+                <div class="result-content" id="resultContent">
+                    <p id="transcriptionText"></p>
+                </div>
+            </div>
+        </section>
+
+        <section class="error-section" id="errorSection">
+            <div class="error-card">
+                <div class="error-icon">
+                    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/>
+                        <path d="M12 8V12M12 16H12.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                    </svg>
+                </div>
+                <p id="errorText"></p>
+            </div>
+        </section>
+    </main>
+
+    <footer class="footer">
+        <p>Powered by Mamba-based Diffusion Model</p>
+    </footer>
+
+    <script>
+        const uploadZone = document.getElementById('uploadZone');
+        const audioInput = document.getElementById('audioInput');
+        const filePreview = document.getElementById('filePreview');
+        const fileName = document.getElementById('fileName');
+        const fileSize = document.getElementById('fileSize');
+        const removeFile = document.getElementById('removeFile');
+        const audioPlayer = document.getElementById('audioPlayer');
+        const transcribeBtn = document.getElementById('transcribeBtn');
+        const resultSection = document.getElementById('resultSection');
+        const transcriptionText = document.getElementById('transcriptionText');
+        const copyBtn = document.getElementById('copyBtn');
+        const errorSection = document.getElementById('errorSection');
+        const errorText = document.getElementById('errorText');
+
+        let selectedFile = null;
+
+        // Drag and drop handlers
+        uploadZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadZone.classList.add('dragover');
+        });
+
+        uploadZone.addEventListener('dragleave', () => {
+            uploadZone.classList.remove('dragover');
+        });
+
+        uploadZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadZone.classList.remove('dragover');
+            const file = e.dataTransfer.files[0];
+            if (file) handleFile(file);
+        });
+
+        uploadZone.addEventListener('click', () => {
+            audioInput.click();
+        });
+
+        audioInput.addEventListener('change', (e) => {
+            if (e.target.files[0]) handleFile(e.target.files[0]);
+        });
+
+        function handleFile(file) {
+            selectedFile = file;
+            fileName.textContent = file.name;
+            fileSize.textContent = formatFileSize(file.size);
+            
+            const url = URL.createObjectURL(file);
+            audioPlayer.src = url;
+            
+            uploadZone.classList.add('hidden');
+            filePreview.classList.add('visible');
+            transcribeBtn.disabled = false;
+            
+            // Hide previous results
+            resultSection.classList.remove('visible');
+            errorSection.classList.remove('visible');
+        }
+
+        function formatFileSize(bytes) {
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+        }
+
+        removeFile.addEventListener('click', () => {
+            selectedFile = null;
+            audioInput.value = '';
+            audioPlayer.src = '';
+            uploadZone.classList.remove('hidden');
+            filePreview.classList.remove('visible');
+            transcribeBtn.disabled = true;
+            resultSection.classList.remove('visible');
+            errorSection.classList.remove('visible');
+        });
+
+        transcribeBtn.addEventListener('click', async () => {
+            if (!selectedFile) return;
+            
+            const btnText = transcribeBtn.querySelector('.btn-text');
+            const btnLoader = transcribeBtn.querySelector('.btn-loader');
+            
+            // Show loading state
+            btnText.hidden = true;
+            btnLoader.hidden = false;
+            transcribeBtn.disabled = true;
+            errorSection.classList.remove('visible');
+            
+            try {
+                const formData = new FormData();
+                formData.append('audio', selectedFile);
+                
+                const response = await fetch('/transcribe', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                
+                if (data.error) {
+                    throw new Error(data.error);
+                }
+                
+                transcriptionText.textContent = data.transcription || '(No transcription available)';
+                resultSection.classList.add('visible');
+                
+            } catch (error) {
+                errorText.textContent = error.message;
+                errorSection.classList.add('visible');
+            } finally {
+                btnText.hidden = false;
+                btnLoader.hidden = true;
+                transcribeBtn.disabled = false;
+            }
+        });
+
+        copyBtn.addEventListener('click', async () => {
+            try {
+                await navigator.clipboard.writeText(transcriptionText.textContent);
+                copyBtn.classList.add('copied');
+                setTimeout(() => copyBtn.classList.remove('copied'), 2000);
+            } catch (err) {
+                console.error('Failed to copy:', err);
+            }
+        });
+    </script>
+</body>
+</html>

@@ -6,3 +6,5 @@ venv/
 *.pt
 tokenizer/*
 *.log
+*.bin
+*.ipynb_checkpoints
