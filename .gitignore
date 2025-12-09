@@ -5,3 +5,4 @@ Data/
 venv/
 *.pt
 tokenizer/*
+*.log

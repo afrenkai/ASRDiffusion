@@ -6,6 +6,8 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.amp import grad_scaler, autocast
 from tqdm import tqdm
 import argparse
+import logging
+import torch.nn.functional as F
 from models.mamba_denoiser import MambaDenoiser
 from models.audio_encoder import AudioEncoder
 from models.embed import TextEmbedding
@@ -17,13 +19,22 @@ from utils.metrics import WERMetric
 from utils.distributed import setup_distributed, cleanup_distributed
 from utils.tokenize import load_tokenizer
 
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("training.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 def train(args):
     rank, local_rank, world_size, is_distributed = setup_distributed()
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
     
     if rank == 0:
-        print(f"Training on {world_size} GPUs" if is_distributed else "Training on single device")
+        logger.info(f"Training on {world_size} GPUs" if is_distributed else "Training on single device")
 
     tokenizer_path = args.tokenizer_path if hasattr(args, 'tokenizer_path') else "tokenizer/tokenizer.json"
     tokenizer, token_ids = load_tokenizer(tokenizer_path)
@@ -39,6 +50,7 @@ def train(args):
     ).to(device)
 
     model = MambaDenoiser(
+        vocab_size=vocab_size,
         text_dim=args.d_model,
         d_model=args.d_model,
         audio_channels=128,
@@ -65,11 +77,10 @@ def train(args):
 
     if args.sample:
         if rank == 0:
-            print(
-                "[INFO] Sample mode active: using hf-internal-testing/librispeech_asr_demo"
-            )
+            if args.verbose:
+                print("[INFO] demo mode active: using hf-internal-testing/librispeech_asr_demo")
         args.batch_size = min(2, args.batch_size)
-        args.epochs = 10
+        args.epochs = 500
         args.num_steps = 10
     elif rank == 0:
         print("Loading data...")
@@ -123,51 +134,58 @@ def train(args):
 
                 t = torch.rand(x_0.shape[0], device=device)
 
-                # Generate mask for input_ids to ensure PE is applied to mask tokens
                 masking_rate = scheduler.get_masking_rate(t)
                 corrupt_mask = torch.rand(input_ids.shape, device=device) < masking_rate.unsqueeze(1)
                 
                 masked_input_ids = input_ids.clone()
                 masked_input_ids[corrupt_mask] = mask_token_id
-                
-                # Get x_masked with PE
                 x_masked, _ = embedder_module(masked_input_ids, token_mask)
 
-                predicted_embeddings = model(
+                predicted_logits = model(
                     x_t=x_masked,
                     t=t,
                     audio_features=audio_features,
                     corrupt_mask=None, # Disable internal masking to preserve PE
                 )
 
-                loss = torch.nn.functional.mse_loss(
-                    predicted_embeddings[corrupt_mask], x_0[corrupt_mask]
-                )
+                # Calculate Cross Entropy Loss on masked tokens only
+                # predicted_logits: [B, S, V]
+                # input_ids: [B, S]
+                # corrupt_mask: [B, S]
+                logits_flat = predicted_logits[corrupt_mask]
+                targets_flat = input_ids[corrupt_mask]
+                
+                loss = F.cross_entropy(logits_flat, targets_flat)
 
             scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            
             scaler.step(optimizer)
             scaler.update()
 
             if rank == 0:
-                pbar.set_postfix({"loss": loss.item()})
+                pbar.set_postfix({"loss": loss.item(), "grad": grad_norm.item()})
+                if pbar.n % 100 == 0 and args.verbose:
+                    logger.info(f"Step {pbar.n}: Loss={loss.item():.4f}, GradNorm={grad_norm.item():.4f}")
 
         validate(model, audio_encoder, text_embedder, scheduler, val_dl, tokenizer, device, args, mask_token_id, rank, is_distributed, eos_token_id)
-
-        if rank == 0 and (epoch + 1) % 5 == 0:
-            model_state = model.module.state_dict() if is_distributed else model.state_dict()
-            audio_state = audio_encoder.module.state_dict() if is_distributed else audio_encoder.state_dict()
-            embedder_state = text_embedder.module.state_dict() if is_distributed else text_embedder.state_dict()
-            
-            torch.save(
-                {
-                    "model_state_dict": model_state,
-                    "audio_encoder_state_dict": audio_state,
-                    "text_embedder_state_dict": embedder_state,
-                    "optimizer_state_dict": optimizer.state_dict(),
-                },
-                f"checkpoint_epoch_{epoch+1}.pt",
-            )
-            
+        if args.save_freq:
+            if rank == 0 and (epoch + 1) % args.save_freq == 0:
+                model_state = model.module.state_dict() if is_distributed else model.state_dict()
+                audio_state = audio_encoder.module.state_dict() if is_distributed else audio_encoder.state_dict()
+                embedder_state = text_embedder.module.state_dict() if is_distributed else text_embedder.state_dict()
+                
+                torch.save(
+                    {
+                        "model_state_dict": model_state,
+                        "audio_encoder_state_dict": audio_state,
+                        "text_embedder_state_dict": embedder_state,
+                        "optimizer_state_dict": optimizer.state_dict(),
+                    },
+                    f"checkpoint_epoch_{epoch+1}.pt",
+                )
+                
     cleanup_distributed()
 
 
@@ -185,7 +203,7 @@ def validate(model, audio_encoder, text_embedder, scheduler, val_dl, tokenizer, 
     
     with torch.no_grad():
         for i, batch in enumerate(val_dl):
-            if i >= 2: # Limit validation batches for speed
+            if i >= 2: 
                 break
                 
             (
@@ -212,19 +230,20 @@ def validate(model, audio_encoder, text_embedder, scheduler, val_dl, tokenizer, 
                 
                 for t_idx, t_val in enumerate(timesteps):
                     t = torch.full((batch_size,), t_val.item(), device=device)
+                    logits = model(x_t, t, audio_features)
                     
-                    x_0_pred = model(x_t, t, audio_features)
+                    pred_ids = torch.argmax(logits, dim=-1)
+                    x_0_pred_emb, _ = embedder_module(pred_ids, None)
                     
                     if t_idx < len(timesteps) - 1:
                         t_next = timesteps[t_idx+1]
                         t_next_batch = torch.full((batch_size,), t_next.item(), device=device)
-                        x_t, _ = scheduler.apply_masking(x_0_pred, t_next_batch, mask_value=mask_token_emb)
+                        x_t, _ = scheduler.apply_masking(x_0_pred_emb, t_next_batch, mask_value=mask_token_emb)
                     else:
-                        x_t = x_0_pred
+                        x_t = x_0_pred_emb
+                        final_logits = logits
                 
-                emb_weights = embedder_module.tok_emb.weight
-                logits = torch.matmul(x_t, emb_weights.t())
-                predicted_ids = torch.argmax(logits, dim=-1)
+                predicted_ids = torch.argmax(final_logits, dim=-1)
             
             predictions = []
             references = []
@@ -243,8 +262,6 @@ def validate(model, audio_encoder, text_embedder, scheduler, val_dl, tokenizer, 
                 references.append(ref_text)
                 
             metric.update(predictions, references)
-            
-    # For strict correctness, we should gather all predictions, but this is sufficient for monitoring.
     wer = metric.total_wer / metric.count if metric.count > 0 else 0.0
     cer = metric.total_cer / metric.count if metric.count > 0 else 0.0
     
@@ -267,11 +284,14 @@ if __name__ == "__main__":
     parser.add_argument("--d_model", type=int, default=256)
     parser.add_argument("--n_layers", type=int, default=4)
     parser.add_argument("--num_steps", type=int, default=1000)
+    parser.add_argument("--tokenizer_path", type=str, default="tokenizer/tokenizer.json")
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose logging every 100 steps")
     parser.add_argument(
         "--sample",
         action="store_true",
         help="Run a small sample for quick GPU test using 73-entry demo dataset",
     )
+    parser.add_argument("--save_freq", type=int, default=10, help="Frequency of saving the model (in epochs)")
 
     args = parser.parse_args()
     train(args)

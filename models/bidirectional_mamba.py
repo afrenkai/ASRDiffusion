@@ -47,10 +47,10 @@ class BidirectionalMambaBlock(nn.Module):
 
     def forward(self, x, inference_params=None):
 
-        # x: [B, L, D]
-        out_fwd = self.forward_mamba(x)
+        
+        out_fwd = self.forward_mamba(x) # [B, L, D]
 
-        # Flip sequence along length dimension (dim=1)
+        # Flip sequence along length dimension (dim=1), do a little <-> op
         x_rev = torch.flip(x, dims=[1])
         out_rev = self.backward_mamba(x_rev)
         out_rev = torch.flip(out_rev, dims=[1])

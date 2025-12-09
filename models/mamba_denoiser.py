@@ -30,13 +30,14 @@ class MambaDenoiser(nn.Module):
     - corrupt_mask: optional corruption mask [B x L] where 1=corrupted, 0=clean
 
     Returns:
-    - score: torch.Tensor predicted score ∇log p(x_t|audio) of shape [B x S x E] for score matching
+    - score: torch.Tensor predicted score d/dx log p(x_t|audio) of shape [B x S x E] for score matching
 
     Rest are hparams, will expand on them in config.py
     """
 
     def __init__(
         self,
+        vocab_size: int,
         text_dim: int = 128,
         audio_channels: int = 128,
         d_model: int = 256,
@@ -48,14 +49,15 @@ class MambaDenoiser(nn.Module):
         n_layers: int = 4,
         dropout: float = 0.1,
         mask_token_id: int = -1,
-        predict_scores: bool = True,
-        prediction_type: str = "score",
+        predict_scores: bool = False,
+        prediction_type: str = "logits",
         use_self_cond: bool = False,
         device=None,
         dtype=None,
     ):
         super().__init__()
         factory_kwargs = {"device": device, "dtype": dtype}
+        self.vocab_size = vocab_size
         self.text_dim = text_dim
         self.audio_channels = audio_channels
         self.d_model = d_model
@@ -77,13 +79,8 @@ class MambaDenoiser(nn.Module):
         self.text_proj = nn.Linear(text_dim, d_model)
         self.audio_pool = nn.AdaptiveAvgPool2d((1, None))
         self.audio_proj = nn.Linear(audio_channels, d_model)
-        self.cross_attn = nn.MultiheadAttention(
-            embed_dim=d_model,
-            num_heads=4,
-            dropout=dropout,
-            batch_first=True,
-        )
-        self.ln_cross = nn.LayerNorm(d_model)
+        
+        
         self.mamba_blocks = nn.ModuleList(
             [
                 BidirectionalMambaBlock(
@@ -105,11 +102,26 @@ class MambaDenoiser(nn.Module):
             [nn.LayerNorm(d_model) for l in range(n_layers)]
         )
         
+        self.cross_attn_layers = nn.ModuleList(
+            [
+                nn.MultiheadAttention(
+                    embed_dim=d_model,
+                    num_heads=4,
+                    dropout=dropout,
+                    batch_first=True,
+                )
+                for _ in range(n_layers)
+            ]
+        )
+        self.cross_attn_norms = nn.ModuleList(
+            [nn.LayerNorm(d_model) for _ in range(n_layers)]
+        )
+        
         self.film_layers = nn.ModuleList(
             [FiLMLayer(d_model * 2, d_model) for _ in range(n_layers)]
         )
 
-        self.output_proj = nn.Linear(d_model, text_dim)
+        self.output_proj = nn.Linear(d_model, vocab_size)
 
         if self.predict_scores:
             self.score_scale = nn.Sequential(
@@ -159,33 +171,33 @@ class MambaDenoiser(nn.Module):
         audio = audio.transpose(1, 2)
         audio = self.audio_proj(audio)
         x = x + t_emb
-        attn_out, _ = self.cross_attn(
-            query=x,
-            key=audio,
-            value=audio,
-            key_padding_mask=None,
-        )
-        x = self.ln_cross(x + attn_out)
         
         audio_pooled = audio.mean(dim=1)
         time_cond = t_emb.squeeze(1)
         cond = torch.cat([audio_pooled, time_cond], dim=-1)
 
-        for mamba_block, ln, film in zip(self.mamba_blocks, self.layer_norms, self.film_layers):
+        for i, (mamba_block, ln, film) in enumerate(zip(self.mamba_blocks, self.layer_norms, self.film_layers)):
             residual = x
             x = ln(x)
             x = mamba_block(x)
-            x = film(x, cond)
             x = x + residual
 
-        output = self.output_proj(x)
-        if self.predict_scores:
+            residual = x
+            x = self.cross_attn_norms[i](x)
+            attn_out, _ = self.cross_attn_layers[i](
+                query=x,
+                key=audio,
+                value=audio,
+                key_padding_mask=None
+            )
+            x = x + attn_out
+            x = film(x, cond)
 
+        output = self.output_proj(x)
+        
+        if self.predict_scores:
             scale = self.score_scale(t_emb)
             output = output * scale
-
-        if mask is not None:
-            output = output * mask.unsqueeze(-1)
 
         return output
 

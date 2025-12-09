@@ -51,8 +51,13 @@ if __name__ == "__main__":
     ds_dict = ds_use(args.root, args.splits, args.subset, args.streaming)
     print("Loaded datasets:", list(ds_dict.keys()))
 
-    hf_train = ds_dict[("validation", None)]
+    for key, ds in ds_dict.items():
+        print(f"Dataset key: {key}")
+        print(f"Type: {type(ds)}")
+        try:
+            print(f"Example element: {ds[0]}")
+            print(f"Keys in dataset item: {ds[0].keys()}")
+        except Exception as e:
+            print(f"Could not print example element: {e}")
+        break
 
-    print("Type of hf_train:", type(hf_train))
-    print("Example element:", hf_train[0])
-    print("Keys in dataset item:", hf_train[0].keys())
