@@ -85,3 +85,4 @@ class Diffusion:
         sigma_t = sigma_t.view(-1, 1, 1)
         x_0_hat = (x_t - sigma_t * eps) / alpha_t
         return x_0_hat
+
