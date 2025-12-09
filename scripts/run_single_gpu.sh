@@ -5,6 +5,7 @@ set -e
 echo "Preparing Dataset (LibriSpeech train.clean.100 & validation.clean)"
 #just like with the slurm version, assumes this is run from scripts/. if base, just remove the ../
 if [ ! -d "../Data/" ]; then
+  cd ..
   uv run -m dataset.ds_utils \
     --splits train.100 validation test\
     --subset clean
@@ -12,6 +13,8 @@ if [ ! -d "../Data/" ]; then
 else
   echo "already have the dataset, skipping ..."
 fi
+
+cd scripts/
 
 if [ ! -d "../tokenizer/" ]; then
   echo "Preparing Tokenizer"
@@ -27,7 +30,7 @@ echo "Starting Single GPU Training (~ RTX 3090 w 24gb vram)"
 cd ..
 uv run -m train.train \
     --batch_size 16 \
-    --epochs 10 \
+    --epochs 100 \
     --lr 1e-4 \
     --d_model 256 \
     --n_layers 4 \

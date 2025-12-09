@@ -11,7 +11,6 @@ hf_stream = load_dataset(
 
 hf = [x for _, x in zip(range(3), hf_stream)]
 
-# Load tokenizer
 tokenizer_path = "tokenizer/tokenizer.json"
 tokenizer = Tokenizer.from_file(tokenizer_path)
 

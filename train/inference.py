@@ -3,6 +3,7 @@ import argparse
 import torch.nn.functional as F
 from torch.amp import autocast
 from tqdm import tqdm
+import logging
 from models.mamba_denoiser import MambaDenoiser
 from models.audio_encoder import AudioEncoder
 from models.embed import TextEmbedding
@@ -11,6 +12,16 @@ from dataset.dataloader import load_data
 from utils.consts import PAD, EOS
 from utils.metrics import WERMetric
 from utils.tokenize import load_tokenizer
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("inference.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 
 class MaskGitSampler:
@@ -33,9 +44,6 @@ class MaskGitSampler:
         metric = WERMetric()
         
         print(f"Starting generation with {num_steps} steps...")
-        
-        # Get embedding weights for logit projection of size [Vocab, Embed]
-        emb_weights = self.text_embedder.tok_emb.weight
         mask_token_emb = self.text_embedder.tok_emb(
             torch.tensor(self.mask_token_id, device=self.device)
         ).view(1, 1, -1)
@@ -66,23 +74,14 @@ class MaskGitSampler:
                 
                 for i, t_val in enumerate(tqdm(timesteps, desc=f"Batch {batch_idx+1} Sampling")):
                     t = torch.full((batch_size,), t_val.item(), device=self.device)
+                    logits = self.model(x_t, t, audio_features)
                     
-                    # Predict x_0 (embeddings) from current masked state
-                    x_0_pred = self.model(x_t, t, audio_features)
-                    
-                    # x_0_pred: [B, S, E] @ [E, V] -> [B, S, V]
-                    logits = torch.matmul(x_0_pred, emb_weights.t())
                     probs = F.softmax(logits / temperature, dim=-1)
-                    
-                    # Sample tokens from the distribution
-                    # [B, S]
                     # Using multinomial sampling allows for diversity since argmax is by definition greedy
                     if temperature < 1e-5:
                         sampled_ids = torch.argmax(logits, dim=-1)
                     else:
                         sampled_ids = torch.multinomial(probs.view(-1, probs.size(-1)), 1).view(batch_size, seq_len)
-                    
-                    # Get confidence scores (probability of the sampled token). gathering makes it of size [B, S]
                     confidence = torch.gather(probs, -1, sampled_ids.unsqueeze(-1)).squeeze(-1)
                     
                     
@@ -93,19 +92,12 @@ class MaskGitSampler:
                         # We want to know what percentage of tokens should be masked at the NEXT step.
                         # t=1 -> 100% masked, t=0 -> 0% masked
                         mask_ratio = self.scheduler.get_masking_rate(torch.tensor([t_next], device=self.device)).item()
-                        
-                        # Number of tokens to mask
                         num_to_mask = int(mask_ratio * seq_len)
                         
                         # Mask the lowest confidence tokens (MaskGIT strategy)
                         # We keep the (seq_len - num_to_mask) tokens with highest confidence.
                         # So we mask the 'num_to_mask' tokens with lowest confidence.
-                        
-                        # torch.topk with largest=False gives smallest values (lowest confidence)
-                        # values, indices = topk(...)
                         _, mask_indices = torch.topk(confidence, num_to_mask, dim=1, largest=False)
-                        
-                        # Create boolean mask [B, S]
                         mask = torch.zeros((batch_size, seq_len), dtype=torch.bool, device=self.device)
                         mask.scatter_(1, mask_indices, True)
                         
@@ -115,9 +107,11 @@ class MaskGitSampler:
 
                         next_ids = sampled_ids.clone()
                         next_ids[mask] = self.mask_token_id
-                        
-                        # Re-embed to get PE
                         x_t, _ = self.text_embedder(next_ids, None)
+                        if i % 5 == 0:
+                            logger.info(f"Step {i}: Mask Ratio={mask_ratio:.2f}, Num Masked={num_to_mask}, Max Conf={confidence.max().item():.4f}, Min Conf={confidence.min().item():.4f}")
+                            sample_dec = self.tokenizer.decode(next_ids[0].tolist(), skip_special_tokens=False)
+                            logger.info(f"Step {i} Sample: {sample_dec[:100]}...")
                         
                     else:
 
@@ -166,12 +160,12 @@ def inference(args):
 
     audio_encoder = AudioEncoder(in_channels=1, dropout=0.1).to(device)
     text_embedder = TextEmbedding(
-        vocab_size=vocab_size, 
-        embed_dim=args.d_model, 
-        max_seq_len=512
+        vocab_size=vocab_size,
+        embed_dim=args.d_model,
     ).to(device)
     
     model = MambaDenoiser(
+        vocab_size=vocab_size,
         text_dim=args.d_model,
         d_model=args.d_model,
         audio_channels=128,

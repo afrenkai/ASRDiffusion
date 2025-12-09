@@ -12,6 +12,7 @@ def test_fix():
         d_model=d_model,
         audio_channels=audio_channels,
         n_layers=2,
+        vocab_size=1000,
     )
     
     batch_size = 2
